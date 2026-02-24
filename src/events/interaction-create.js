@@ -2,6 +2,7 @@ const config = require("../config");
 const logger = require("../utils/logger");
 const cooldownManager = require("../utils/cooldown-manager");
 const { handleBeijoRetribuirButton } = require("../utils/create-action-command");
+const { trackDailyMissionProgress } = require("../utils/economy-store");
 const {
   buildCommandErrorOptions,
   formatCooldown,
@@ -14,6 +15,23 @@ function resolveCooldownMs(command) {
   }
 
   return config.cooldown.defaultMs;
+}
+
+function formatMissionFollowupDescription(missionUpdate) {
+  if (!missionUpdate?.awardedPoints || missionUpdate.awardedPoints <= 0) {
+    return "";
+  }
+
+  const completed = (missionUpdate.completedRewards || [])
+    .map((entry) => entry.label)
+    .filter(Boolean);
+  const completedText =
+    completed.length > 0 ? `Concluidas: ${completed.join(" | ")}.` : "Missao concluida.";
+  const bonusText = missionUpdate.bonusGranted
+    ? ` Bonus diario +${missionUpdate.bonusRewardPoints}.`
+    : "";
+
+  return `Voce recebeu +${missionUpdate.awardedPoints} pontos. ${completedText}${bonusText}`;
 }
 
 module.exports = {
@@ -91,6 +109,28 @@ module.exports = {
 
     try {
       await command.execute(interaction, client);
+
+      if (interaction.inGuild() && command.category === "actions") {
+        const missionUpdate = trackDailyMissionProgress(
+          interaction.user.id,
+          interaction.guildId,
+          "action_command",
+          1
+        );
+
+        if (missionUpdate?.ok && missionUpdate.awardedPoints > 0) {
+          await sendCv2(
+            interaction,
+            {
+              tone: "success",
+              eyebrow: "Missoes diarias",
+              title: "Progresso atualizado",
+              description: formatMissionFollowupDescription(missionUpdate)
+            },
+            true
+          );
+        }
+      }
     } catch (error) {
       logger.error(`Erro ao executar /${interaction.commandName}`, error);
       await sendCv2(

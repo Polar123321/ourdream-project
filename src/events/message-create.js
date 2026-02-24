@@ -1,9 +1,12 @@
-const config = require("../config");
 const logger = require("../utils/logger");
 const {
+  getChatRewardSettings,
   registerChatMessage,
-  MESSAGES_PER_REWARD
+  trackDailyMissionProgress
 } = require("../utils/economy-store");
+
+const spamStateByUser = new Map();
+let lastTrackerSweepAtMs = 0;
 
 function toClampedInteger(value, fallback, min, max) {
   const parsed = Number.parseInt(value, 10);
@@ -15,79 +18,45 @@ function toClampedInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, parsed));
 }
 
-const SPAM_WINDOW_MS = toClampedInteger(
-  config?.economy?.chatRewards?.spamWindowMs,
-  10_000,
-  1000,
-  60_000
-);
-const SPAM_MESSAGE_LIMIT = toClampedInteger(
-  config?.economy?.chatRewards?.spamMessageLimit,
-  10,
-  2,
-  30
-);
-const SPAM_COOLDOWN_BASE_MS = toClampedInteger(
-  config?.economy?.chatRewards?.spamCooldownBaseMs,
-  10_000,
-  1000,
-  300_000
-);
-const SPAM_COOLDOWN_MAX_MS = toClampedInteger(
-  config?.economy?.chatRewards?.spamCooldownMaxMs,
-  60_000,
-  1000,
-  600_000
-);
-const SPAM_STRIKE_RESET_MS = toClampedInteger(
-  config?.economy?.chatRewards?.spamStrikeResetMs,
-  60_000,
-  5000,
-  3_600_000
-);
-const SPAM_BACKLOG_DELETE_LIMIT = toClampedInteger(
-  config?.economy?.chatRewards?.backlogDeleteLimit,
-  8,
-  0,
-  30
-);
-const SPAM_WARN_COOLDOWN_MS = toClampedInteger(
-  config?.economy?.chatRewards?.spamWarnCooldownMs,
-  2500,
-  0,
-  60_000
-);
-const SPAM_AUTO_MUTE_TRIGGER_COOLDOWN_MS = toClampedInteger(
-  config?.economy?.chatRewards?.autoMuteCooldownThresholdMs,
-  30_000,
-  0,
-  600_000
-);
-const SPAM_AUTO_MUTE_DURATION_MS = toClampedInteger(
-  config?.economy?.chatRewards?.autoMuteDurationMs,
-  600_000,
-  60_000,
-  2_419_200_000
-);
-const REWARD_NOTICE_DELETE_AFTER_MS =
-  toClampedInteger(
-    config?.economy?.chatRewards?.rewardNoticeDeleteAfterSeconds,
-    15,
-    0,
-    300
-  ) * 1000;
+function resolveRuntimeChatSettings() {
+  const source = getChatRewardSettings();
 
-const TRACKER_SWEEP_INTERVAL_MS = Math.max(1000, Math.min(5000, SPAM_WINDOW_MS));
-const SPAM_HISTORY_RETENTION_MS = SPAM_WINDOW_MS;
-const TRACKER_STATE_TTL_MS = Math.max(
-  SPAM_WINDOW_MS,
-  SPAM_HISTORY_RETENTION_MS,
-  SPAM_STRIKE_RESET_MS,
-  SPAM_COOLDOWN_MAX_MS
-) * 2;
+  return {
+    spamWindowMs: toClampedInteger(source?.spamWindowMs, 10_000, 1000, 60_000),
+    spamMessageLimit: toClampedInteger(source?.spamMessageLimit, 10, 2, 30),
+    spamCooldownBaseMs: toClampedInteger(source?.spamCooldownBaseMs, 10_000, 1000, 300_000),
+    spamCooldownMaxMs: toClampedInteger(source?.spamCooldownMaxMs, 60_000, 1000, 600_000),
+    spamStrikeResetMs: toClampedInteger(source?.spamStrikeResetMs, 60_000, 5000, 3_600_000),
+    backlogDeleteLimit: toClampedInteger(source?.backlogDeleteLimit, 8, 0, 30),
+    spamWarnCooldownMs: toClampedInteger(source?.spamWarnCooldownMs, 2500, 0, 60_000),
+    autoMuteCooldownThresholdMs: toClampedInteger(
+      source?.autoMuteCooldownThresholdMs,
+      30_000,
+      0,
+      600_000
+    ),
+    autoMuteDurationMs: toClampedInteger(source?.autoMuteDurationMs, 600_000, 60_000, 2_419_200_000),
+    rewardNoticeDeleteAfterMs:
+      toClampedInteger(source?.rewardNoticeDeleteAfterSeconds, 15, 0, 300) * 1000
+  };
+}
 
-const spamStateByUser = new Map();
-let lastTrackerSweepAtMs = 0;
+function trackerSweepIntervalMs(settings) {
+  return Math.max(1000, Math.min(5000, settings.spamWindowMs));
+}
+
+function spamHistoryRetentionMs(settings) {
+  return settings.spamWindowMs;
+}
+
+function trackerStateTtlMs(settings) {
+  return Math.max(
+    settings.spamWindowMs,
+    spamHistoryRetentionMs(settings),
+    settings.spamStrikeResetMs,
+    settings.spamCooldownMaxMs
+  ) * 2;
+}
 
 function isServerBooster(member) {
   return Boolean(member?.premiumSinceTimestamp || member?.premiumSince || member?.premium_since);
@@ -135,33 +104,33 @@ function ensureSpamState(trackerKey) {
   return state;
 }
 
-function resetStrikesIfExpired(state, nowMs) {
+function resetStrikesIfExpired(state, nowMs, settings) {
   if (!state?.strikes || !state?.lastStrikeAtMs) {
     return;
   }
 
-  if (nowMs - state.lastStrikeAtMs > SPAM_STRIKE_RESET_MS) {
+  if (nowMs - state.lastStrikeAtMs > settings.spamStrikeResetMs) {
     state.strikes = 0;
     state.lastAutoMuteStrike = 0;
     state.lastStrikeAtMs = 0;
   }
 }
 
-function computeEscalatedCooldownMs(strikes) {
+function computeEscalatedCooldownMs(strikes, settings) {
   const safeStrikes = Math.max(1, toClampedInteger(strikes, 1, 1, 30));
-  const rawCooldownMs = SPAM_COOLDOWN_BASE_MS * (2 ** (safeStrikes - 1));
+  const rawCooldownMs = settings.spamCooldownBaseMs * (2 ** (safeStrikes - 1));
 
   return Math.min(
-    SPAM_COOLDOWN_MAX_MS,
-    Math.max(SPAM_COOLDOWN_BASE_MS, Math.floor(rawCooldownMs))
+    settings.spamCooldownMaxMs,
+    Math.max(settings.spamCooldownBaseMs, Math.floor(rawCooldownMs))
   );
 }
 
-function applySpamStrike(state, timestampMs, reason, metadata = {}) {
+function applySpamStrike(state, timestampMs, reason, settings, metadata = {}) {
   state.strikes += 1;
   state.lastStrikeAtMs = timestampMs;
 
-  const cooldownMs = computeEscalatedCooldownMs(state.strikes);
+  const cooldownMs = computeEscalatedCooldownMs(state.strikes, settings);
   state.mutedUntilMs = Math.max(state.mutedUntilMs, timestampMs + cooldownMs);
 
   return {
@@ -173,27 +142,27 @@ function applySpamStrike(state, timestampMs, reason, metadata = {}) {
   };
 }
 
-function sweepSpamTracker(nowMs) {
-  if (nowMs - lastTrackerSweepAtMs < TRACKER_SWEEP_INTERVAL_MS) {
+function sweepSpamTracker(nowMs, settings) {
+  if (nowMs - lastTrackerSweepAtMs < trackerSweepIntervalMs(settings)) {
     return;
   }
 
-  const cutoffMs = nowMs - SPAM_WINDOW_MS;
-  const historyCutoffMs = nowMs - SPAM_HISTORY_RETENTION_MS;
+  const cutoffMs = nowMs - settings.spamWindowMs;
+  const historyCutoffMs = nowMs - spamHistoryRetentionMs(settings);
 
   for (const [trackerKey, state] of spamStateByUser.entries()) {
     pruneOldTimestamps(state.timestamps, cutoffMs);
     pruneOldHistory(state.history, historyCutoffMs);
-    resetStrikesIfExpired(state, nowMs);
+    resetStrikesIfExpired(state, nowMs, settings);
 
     const isCoolingDown = state.mutedUntilMs > nowMs;
     const shouldDropState =
-      !isCoolingDown &&
-      state.timestamps.length === 0 &&
-      state.history.length === 0 &&
-      state.strikes === 0 &&
-      nowMs - state.lastCountedAtMs > TRACKER_STATE_TTL_MS &&
-      nowMs - state.lastWarnAtMs > TRACKER_STATE_TTL_MS;
+      !isCoolingDown
+      && state.timestamps.length === 0
+      && state.history.length === 0
+      && state.strikes === 0
+      && nowMs - state.lastCountedAtMs > trackerStateTtlMs(settings)
+      && nowMs - state.lastWarnAtMs > trackerStateTtlMs(settings);
 
     if (shouldDropState) {
       spamStateByUser.delete(trackerKey);
@@ -203,16 +172,16 @@ function sweepSpamTracker(nowMs) {
   lastTrackerSweepAtMs = nowMs;
 }
 
-function evaluateSpamWindow(userId, guildId, timestampMs, message) {
-  sweepSpamTracker(timestampMs);
+function evaluateSpamWindow(userId, guildId, timestampMs, message, settings) {
+  sweepSpamTracker(timestampMs, settings);
 
   const trackerKey = `${guildId}:${userId}`;
   const state = ensureSpamState(trackerKey);
-  const cutoffMs = timestampMs - SPAM_WINDOW_MS;
-  const historyCutoffMs = timestampMs - SPAM_HISTORY_RETENTION_MS;
+  const cutoffMs = timestampMs - settings.spamWindowMs;
+  const historyCutoffMs = timestampMs - spamHistoryRetentionMs(settings);
   pruneOldTimestamps(state.timestamps, cutoffMs);
   pruneOldHistory(state.history, historyCutoffMs);
-  resetStrikesIfExpired(state, timestampMs);
+  resetStrikesIfExpired(state, timestampMs, settings);
 
   if (state.mutedUntilMs > timestampMs) {
     return {
@@ -232,8 +201,8 @@ function evaluateSpamWindow(userId, guildId, timestampMs, message) {
     messageId: String(message?.id || "")
   });
 
-  if (state.timestamps.length >= SPAM_MESSAGE_LIMIT) {
-    return applySpamStrike(state, timestampMs, "burst", {
+  if (state.timestamps.length >= settings.spamMessageLimit) {
+    return applySpamStrike(state, timestampMs, "burst", settings, {
       recentCount: state.timestamps.length
     });
   }
@@ -248,17 +217,17 @@ function evaluateSpamWindow(userId, guildId, timestampMs, message) {
   };
 }
 
-function shouldLogSpamWarning(state, nowMs) {
+function shouldLogSpamWarning(state, nowMs, settings) {
   if (!state) {
     return true;
   }
 
-  if (SPAM_WARN_COOLDOWN_MS <= 0) {
+  if (settings.spamWarnCooldownMs <= 0) {
     state.lastWarnAtMs = nowMs;
     return true;
   }
 
-  if (nowMs - state.lastWarnAtMs < SPAM_WARN_COOLDOWN_MS) {
+  if (nowMs - state.lastWarnAtMs < settings.spamWarnCooldownMs) {
     return false;
   }
 
@@ -266,7 +235,7 @@ function shouldLogSpamWarning(state, nowMs) {
   return true;
 }
 
-function formatSpamWarningDetails(spamState) {
+function formatSpamWarningDetails(spamState, settings) {
   if (!spamState || spamState.reason === "ok") {
     return "bloqueado";
   }
@@ -274,7 +243,7 @@ function formatSpamWarningDetails(spamState) {
   if (spamState.reason === "burst") {
     const cooldownSeconds = Math.ceil((spamState.cooldownRemainingMs || 0) / 1000);
     const strikes = toClampedInteger(spamState?.state?.strikes, 1, 1, 999);
-    return `${spamState.recentCount} em ${SPAM_WINDOW_MS}ms | cooldown ${cooldownSeconds}s | strikes ${strikes}`;
+    return `${spamState.recentCount} em ${settings.spamWindowMs}ms | cooldown ${cooldownSeconds}s | strikes ${strikes}`;
   }
 
   if (spamState.reason === "cooldown") {
@@ -339,23 +308,23 @@ async function sendAutoMuteDm(user, payload) {
   await user.send(text);
 }
 
-async function applyAutoMuteForSpam(message, spamState, timestampMs) {
+async function applyAutoMuteForSpam(message, spamState, timestampMs, settings) {
   if (!spamState?.state) {
     return;
   }
 
-  if (SPAM_AUTO_MUTE_TRIGGER_COOLDOWN_MS <= 0) {
+  if (settings.autoMuteCooldownThresholdMs <= 0) {
     return;
   }
 
   if (
-    spamState.reason === "cooldown" ||
-    spamState.reason === "ok"
+    spamState.reason === "cooldown"
+    || spamState.reason === "ok"
   ) {
     return;
   }
 
-  if ((spamState.cooldownRemainingMs || 0) < SPAM_AUTO_MUTE_TRIGGER_COOLDOWN_MS) {
+  if ((spamState.cooldownRemainingMs || 0) < settings.autoMuteCooldownThresholdMs) {
     return;
   }
 
@@ -384,19 +353,19 @@ async function applyAutoMuteForSpam(message, spamState, timestampMs) {
   }
 
   if (
-    Number.isFinite(member.communicationDisabledUntilTimestamp) &&
-    member.communicationDisabledUntilTimestamp > timestampMs + 2000
+    Number.isFinite(member.communicationDisabledUntilTimestamp)
+    && member.communicationDisabledUntilTimestamp > timestampMs + 2000
   ) {
     state.lastAutoMuteStrike = state.strikes;
     return;
   }
 
   const cooldownText = formatDurationMs(spamState.cooldownRemainingMs || 0);
-  const muteDurationText = formatDurationMs(SPAM_AUTO_MUTE_DURATION_MS);
+  const muteDurationText = formatDurationMs(settings.autoMuteDurationMs);
   const reason = `Auto-mute por spam (economia) | cooldown detectado: ${cooldownText}`;
 
   try {
-    await member.timeout(SPAM_AUTO_MUTE_DURATION_MS, reason);
+    await member.timeout(settings.autoMuteDurationMs, reason);
     state.lastAutoMuteStrike = state.strikes;
 
     logger.warn(
@@ -431,17 +400,17 @@ function shouldSkipDeleteError(error) {
   return code === 10008 || code === 50001 || code === 50013;
 }
 
-function collectBacklogMessageIdsForDeletion(state, channelId, nowMs) {
-  if (!state?.history?.length || SPAM_BACKLOG_DELETE_LIMIT <= 0) {
+function collectBacklogMessageIdsForDeletion(state, channelId, nowMs, settings) {
+  if (!state?.history?.length || settings.backlogDeleteLimit <= 0) {
     return [];
   }
 
   const normalizedChannelId = String(channelId || "");
-  const cutoffMs = nowMs - SPAM_HISTORY_RETENTION_MS;
+  const cutoffMs = nowMs - spamHistoryRetentionMs(settings);
   const messageIds = [];
 
   for (let index = state.history.length - 1; index >= 0; index -= 1) {
-    if (messageIds.length >= SPAM_BACKLOG_DELETE_LIMIT) {
+    if (messageIds.length >= settings.backlogDeleteLimit) {
       break;
     }
 
@@ -465,17 +434,17 @@ function collectBacklogMessageIdsForDeletion(state, channelId, nowMs) {
   return [...new Set(messageIds)];
 }
 
-function shouldLogDeleteWarning(state, nowMs) {
+function shouldLogDeleteWarning(state, nowMs, settings) {
   if (!state) {
     return true;
   }
 
-  if (SPAM_WARN_COOLDOWN_MS <= 0) {
+  if (settings.spamWarnCooldownMs <= 0) {
     state.lastDeleteWarnAtMs = nowMs;
     return true;
   }
 
-  if (nowMs - state.lastDeleteWarnAtMs < SPAM_WARN_COOLDOWN_MS) {
+  if (nowMs - state.lastDeleteWarnAtMs < settings.spamWarnCooldownMs) {
     return false;
   }
 
@@ -483,7 +452,7 @@ function shouldLogDeleteWarning(state, nowMs) {
   return true;
 }
 
-async function deleteSpamMessages(message, spamState, timestampMs) {
+async function deleteSpamMessages(message, spamState, timestampMs, settings) {
   if (!message?.channel || typeof message.channel.messages?.delete !== "function") {
     return;
   }
@@ -494,7 +463,8 @@ async function deleteSpamMessages(message, spamState, timestampMs) {
     const backlogIds = collectBacklogMessageIdsForDeletion(
       spamState?.state,
       message.channelId,
-      timestampMs
+      timestampMs,
+      settings
     );
 
     for (const backlogMessageId of backlogIds) {
@@ -514,7 +484,7 @@ async function deleteSpamMessages(message, spamState, timestampMs) {
         return;
       }
 
-      if (!shouldLogDeleteWarning(spamState?.state, timestampMs)) {
+      if (!shouldLogDeleteWarning(spamState?.state, timestampMs, settings)) {
         return;
       }
 
@@ -527,8 +497,8 @@ async function deleteSpamMessages(message, spamState, timestampMs) {
   }
 }
 
-function scheduleRewardNoticeDeletion(sentMessage) {
-  if (!sentMessage || REWARD_NOTICE_DELETE_AFTER_MS <= 0) {
+function scheduleMessageDeletion(sentMessage, deleteAfterMs) {
+  if (!sentMessage || deleteAfterMs <= 0) {
     return;
   }
 
@@ -539,16 +509,36 @@ function scheduleRewardNoticeDeletion(sentMessage) {
       }
 
       logger.warn(
-        `Nao consegui apagar aviso de premio ${sentMessage.id || "desconhecido"}: ${
+        `Nao consegui apagar aviso ${sentMessage.id || "desconhecido"}: ${
           error?.code || error?.message || "erro"
         }`
       );
     });
-  }, REWARD_NOTICE_DELETE_AFTER_MS);
+  }, deleteAfterMs);
 
   if (typeof timer.unref === "function") {
     timer.unref();
   }
+}
+
+function buildMissionRewardText(userId, missionUpdate) {
+  if (!missionUpdate?.awardedPoints || missionUpdate.awardedPoints <= 0) {
+    return "";
+  }
+
+  const completedLabels = (missionUpdate.completedRewards || [])
+    .map((entry) => entry.label)
+    .filter(Boolean);
+
+  const completedText = completedLabels.length > 0
+    ? `Concluidas: ${completedLabels.join(" | ")}.`
+    : "Missao concluida.";
+
+  const bonusText = missionUpdate.bonusGranted
+    ? ` Bonus diario de +${missionUpdate.bonusRewardPoints} aplicado.`
+    : "";
+
+  return `[Missoes] <@${userId}> recebeu +${missionUpdate.awardedPoints} pontos. ${completedText}${bonusText}`;
 }
 
 module.exports = {
@@ -562,23 +552,25 @@ module.exports = {
       return;
     }
 
+    const chatSettings = resolveRuntimeChatSettings();
     const messageTimestampMs = getMessageTimestampMs(message);
     const spamState = evaluateSpamWindow(
       message.author.id,
       message.guildId,
       messageTimestampMs,
-      message
+      message,
+      chatSettings
     );
 
     if (spamState.isSpam) {
-      if (shouldLogSpamWarning(spamState.state, messageTimestampMs)) {
+      if (shouldLogSpamWarning(spamState.state, messageTimestampMs, chatSettings)) {
         logger.warn(
-          `Economia: mensagens de ${message.author.tag} ignoradas por spam (${formatSpamWarningDetails(spamState)}).`
+          `Economia: mensagens de ${message.author.tag} ignoradas por spam (${formatSpamWarningDetails(spamState, chatSettings)}).`
         );
       }
 
-      await deleteSpamMessages(message, spamState, messageTimestampMs);
-      await applyAutoMuteForSpam(message, spamState, messageTimestampMs);
+      await deleteSpamMessages(message, spamState, messageTimestampMs, chatSettings);
+      await applyAutoMuteForSpam(message, spamState, messageTimestampMs, chatSettings);
 
       return;
     }
@@ -586,6 +578,13 @@ module.exports = {
     const result = registerChatMessage(message.author.id, message.guildId, {
       isServerBooster: isServerBooster(message.member)
     });
+
+    const missionUpdate = trackDailyMissionProgress(
+      message.author.id,
+      message.guildId,
+      "chat_message",
+      1
+    );
 
     if (result.awardedPoints > 0) {
       const boosterText =
@@ -605,12 +604,12 @@ module.exports = {
           : "";
 
       logger.info(
-        `Economia: ${message.author.tag} ganhou +${result.awardedPoints} pontos (${MESSAGES_PER_REWARD} mensagens${boosterText}${serverBoosterText}${inflationText}). Saldo atual: ${result.points}.`
+        `Economia: ${message.author.tag} ganhou +${result.awardedPoints} pontos (${result.messagesPerReward} mensagens${boosterText}${serverBoosterText}${inflationText}). Saldo atual: ${result.points}.`
       );
 
       const rewardNotice = await message.channel
         .send(
-          `[Economia] @${message.author.username} recebeu +${result.awardedPoints} pontos por completar ${MESSAGES_PER_REWARD} mensagens (ganho por ciclo ${result.pointsPerReward}${publicServerBoosterText} | inflacao do dia ${result.inflationDailyPercent.toFixed(2)}%). Saldo atual: ${result.points} pontos.`
+          `[Economia] @${message.author.username} recebeu +${result.awardedPoints} pontos por completar ${result.messagesPerReward} mensagens (ganho por ciclo ${result.pointsPerReward}${publicServerBoosterText} | inflacao do dia ${result.inflationDailyPercent.toFixed(2)}%). Saldo atual: ${result.points} pontos.`
         )
         .catch((error) => {
           logger.warn(
@@ -620,7 +619,23 @@ module.exports = {
           );
         });
 
-      scheduleRewardNoticeDeletion(rewardNotice);
+      scheduleMessageDeletion(rewardNotice, chatSettings.rewardNoticeDeleteAfterMs);
+    }
+
+    if (missionUpdate?.ok && missionUpdate.awardedPoints > 0) {
+      const missionText = buildMissionRewardText(message.author.id, missionUpdate);
+
+      if (missionText) {
+        const missionNotice = await message.channel.send(missionText).catch((error) => {
+          logger.warn(
+            `Nao consegui enviar aviso de missao no canal ${message.channel?.id || "desconhecido"}: ${
+              error?.code || error?.message || "erro"
+            }`
+          );
+        });
+
+        scheduleMessageDeletion(missionNotice, chatSettings.rewardNoticeDeleteAfterMs);
+      }
     }
   }
 };

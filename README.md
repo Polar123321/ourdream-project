@@ -18,6 +18,9 @@ Bot modular com foco em seguranca, resiliencia e visual premium em Components V2
 - `/kick`
 - `/permissoeslote`
 - `/beijo`, `/beijar`, `/abraco`, `/tapa`, `/empurrar`, `/soco`, `/morder`, `/cafune`
+- `/saldo`, `/transferir`, `/loja`, `/comprar`, `/resgatar`, `/setarinflacaocanal`
+- `/daily`, `/rank`, `/investir`, `/carteira`, `/missoes`
+- `/economia-admin` (admins)
 
 ## Variaveis de ambiente
 

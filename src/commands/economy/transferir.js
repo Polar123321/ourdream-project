@@ -1,7 +1,10 @@
 const { SlashCommandBuilder } = require("discord.js");
 
 const { createCv2Reply } = require("../../utils/cv2-components");
-const { transferPoints } = require("../../utils/economy-store");
+const {
+  transferPoints,
+  trackDailyMissionProgress
+} = require("../../utils/economy-store");
 
 function formatPoints(value) {
   return new Intl.NumberFormat("pt-BR").format(Math.max(0, Number(value) || 0));
@@ -105,6 +108,44 @@ module.exports = {
       return;
     }
 
+    const missionUpdate = trackDailyMissionProgress(
+      interaction.user.id,
+      interaction.guildId,
+      "transfer_completed",
+      1
+    );
+    const missionCompleted = (missionUpdate?.completedRewards || [])
+      .map((entry) => entry.label)
+      .filter(Boolean)
+      .join(" | ");
+
+    const fields = [
+      { name: "Valor", value: `${formatPoints(result.amount)} pontos` },
+      {
+        name: "Seu saldo agora",
+        value: `${formatPoints(result.senderPoints)} pontos`
+      },
+      {
+        name: "Saldo de quem recebeu",
+        value: `${formatPoints(result.receiverPoints)} pontos`
+      }
+    ];
+
+    if (missionUpdate?.ok && missionUpdate.awardedPoints > 0) {
+      fields.push({
+        name: "Missoes diarias",
+        value: [
+          `+${formatPoints(missionUpdate.awardedPoints)} pontos recebidos`,
+          missionCompleted ? `Concluidas: ${missionCompleted}` : "",
+          missionUpdate.bonusGranted
+            ? `Bonus diario +${formatPoints(missionUpdate.bonusRewardPoints)}`
+            : ""
+        ]
+          .filter(Boolean)
+          .join("\n")
+      });
+    }
+
     await interaction.reply(
       createCv2Reply(interaction, {
         tone: "success",
@@ -113,19 +154,8 @@ module.exports = {
         description: `<@${interaction.user.id}> transferiu ${formatPoints(
           result.amount
         )} pontos para <@${targetUser.id}>.`,
-        fields: [
-          { name: "Valor", value: `${formatPoints(result.amount)} pontos` },
-          {
-            name: "Seu saldo agora",
-            value: `${formatPoints(result.senderPoints)} pontos`
-          },
-          {
-            name: "Saldo de quem recebeu",
-            value: `${formatPoints(result.receiverPoints)} pontos`
-          }
-        ]
+        fields
       })
     );
   }
 };
-

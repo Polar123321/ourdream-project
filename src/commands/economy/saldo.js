@@ -5,8 +5,7 @@ const { BOOSTER_ITEMS } = require("../../data/shop-items");
 const {
   getUserEconomy,
   getInflationSnapshot,
-  MESSAGES_PER_REWARD,
-  POINTS_PER_REWARD
+  getChatRewardSettings
 } = require("../../utils/economy-store");
 
 function formatPoints(value) {
@@ -73,6 +72,7 @@ module.exports = {
     const economy = getUserEconomy(targetUser.id, guildId, {
       isServerBooster: isTargetServerBooster
     });
+    const chatSettings = getChatRewardSettings();
     const inflation = getInflationSnapshot(guildId);
     const ownBalance = targetUser.id === interaction.user.id;
     const boostersText = buildBoosterSummary(economy);
@@ -89,13 +89,13 @@ module.exports = {
             ? "Carteira de pontos"
             : `Carteira de ${targetUser.username}`,
           description:
-            `Base: +${POINTS_PER_REWARD} pontos a cada ${MESSAGES_PER_REWARD} mensagens. Boosters aumentam esse ganho e Nitro Booster recebe 2x.`,
+            `Base: +${chatSettings.pointsPerReward} pontos a cada ${chatSettings.messagesPerReward} mensagens. Boosters aumentam esse ganho e Nitro Booster recebe 2x.`,
           fields: [
             { name: "Usuario", value: `<@${targetUser.id}>` },
             { name: "Pontos atuais", value: `${formatPoints(economy.points)} pontos` },
             {
               name: "Progresso do bonus",
-              value: `${economy.messageProgress}/${MESSAGES_PER_REWARD} mensagens`
+              value: `${economy.messageProgress}/${economy.messagesPerReward} mensagens`
             },
             {
               name: `Faltam para +${formatPoints(economy.pointsPerReward)}`,
@@ -146,7 +146,7 @@ module.exports = {
               value: boostersText
             }
           ],
-          footer: `Regra ativa: +${POINTS_PER_REWARD} pontos por ciclo`
+          footer: `Regra ativa: +${chatSettings.pointsPerReward} pontos por ciclo`
         },
         ownBalance
       )
