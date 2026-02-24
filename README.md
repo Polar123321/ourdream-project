@@ -19,30 +19,6 @@ Bot modular com foco em seguranca, resiliencia e visual premium em Components V2
 - `/permissoeslote`
 - `/beijo`, `/beijar`, `/abraco`, `/tapa`, `/empurrar`, `/soco`, `/morder`, `/cafune`
 
-## O que mudou na refatoracao
-
-- Cliente HTTP central (`src/utils/http-client.js`) com:
-  - timeout
-  - retry com backoff
-  - tratamento de erro consistente
-  - validacao de URL final apos redirects
-- Allowlist de dominios para API e midia (`src/config.js`).
-- Sanitizacao reutilizavel de texto/URL (`src/utils/sanitize.js`).
-- Cooldown por usuario/comando (`src/utils/cooldown-manager.js` + `src/events/interaction-create.js`).
-- `/help` dinamico por categoria via metadata de comando (sem lista hardcoded por nome).
-- Unificacao de comandos de acao: `/beijar` agora usa o mesmo fluxo de `/beijo` e demais.
-- Moderacao reforcada:
-  - `/kick` com validacao de hierarquia (moderador e bot), bloqueios explicitos e erros amigaveis.
-  - `/clear` com validacao de permissao/canal e respostas robustas.
-- Sistema visual Components V2 redesenhado (`src/utils/cv2-components.js`):
-  - temas por tom (`info`, `success`, `error`, `warning/alert`)
-  - hierarquia tipografica consistente
-  - separadores padronizados
-  - botoes com rotulos curtos
-  - fallback visual quando nao houver midia valida
-  - rodape discreto
-- Registro/serializacao de comandos centralizado em `src/utils/command-registry.js`.
-
 ## Variaveis de ambiente
 
 Crie `.env`:
